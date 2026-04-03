@@ -37,3 +37,74 @@ df_recent <- df_recent %>%
   ungroup()
 
 df_recent <- df_recent %>% filter(!is.na(SHOT_LAG1))
+
+# build design matrix
+
+# sample subset 
+set.seed(1)
+df_sample <- df_recent %>% sample_n(200000)
+
+# X matrix (bias + lag)
+X <- cbind(1, df_sample$SHOT_LAG1)
+
+# y vector
+y <- df_sample$SHOT_MADE_BINARY
+
+n <- nrow(X)
+p <- ncol(X)
+
+# logistic function
+
+sigmoid <- function(z) {
+  1 / (1 + exp(-z))
+}
+
+# approximate mle
+
+# use simple optimization
+
+log_likelihood <- function(w) {
+  p <- sigmoid(X %*% w)
+  sum(y * log(p + 1e-8) + (1 - y) * log(1 - p + 1e-8))
+}
+
+# optimize
+opt <- optim(rep(0, p), fn = function(w) -log_likelihood(w))
+
+w_hat <- opt$par
+w_hat
+
+# Bayesian sampling (normal)
+
+# vector of weights (NO matrix)
+p_hat <- sigmoid(X %*% w_hat)
+w_vec <- as.vector(p_hat * (1 - p_hat))
+
+# efficient computation 
+WX <- X * w_vec 
+Sigma_hat <- solve(t(X) %*% WX)
+
+# posterior draws
+n_samples <- 5000
+
+w_tilde <- rmvn(n_samples, mu = w_hat, sigma = Sigma_hat)
+
+# posterior analysis
+
+# posterior summaries
+colMeans(w_tilde)
+
+# histograms
+hist(w_tilde[,1], main = "Posterior of Intercept")
+hist(w_tilde[,2], main = "Posterior of Lag Effect (Hot Hand)")
+
+
+
+
+
+
+
+
+
+
+
