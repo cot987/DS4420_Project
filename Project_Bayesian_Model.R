@@ -1,110 +1,124 @@
-# ===============================
-# BAYESIAN HOT HAND MODEL
-# ===============================
+# installation/setup
+packages <- c("cmdstanr", "brms", "dplyr")
+for (pkg in packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+}
 
-# libraries
+library(cmdstanr)
+library(brms)
 library(dplyr)
-library(mvnfast)
 
-# load and combine data
+Sys.setenv(
+  CPATH = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
+  CPLUS_INCLUDE_PATH = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
+)
 
-folder_path <- "NBA Shot Data"
+# check CmdStan installation
+if (is.null(cmdstanr::cmdstan_path())) {
+  cmdstanr::install_cmdstan()
+}
+cmdstanr::set_cmdstan_path(cmdstanr::cmdstan_path())
+cat("Using CmdStan at:", cmdstanr::cmdstan_path(), "\n")
 
+options(mc.cores = parallel::detectCores())
+
+# load/prep data
+
+folder_path <- "NBA Shot Data"  # path to your CSV files
 files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
 
-df_list <- lapply(files, read.csv)
-df <- bind_rows(df_list)
+df <- bind_rows(lapply(files, read.csv))
+cat("Total rows loaded:", nrow(df), "\n")
 
-cat("Total rows:", nrow(df), "\n")
-
-# clean and prep data
-
-# convert shot outcome
+# clean variables
 df$SHOT_MADE_BINARY <- ifelse(df$SHOT_MADE %in% c(TRUE, 1, "TRUE"), 1, 0)
-
-# fix date format
 df$GAME_DATE <- as.Date(df$GAME_DATE, format = "%m-%d-%Y")
 
-# filter last ~15 years
+# filter recent seasons & create lag variable
 df_recent <- df %>%
-  filter(SEASON_2 >= "2009-10")
-
-# create lag variable
-df_recent <- df_recent %>%
+  filter(SEASON_2 >= "2009-10") %>%
   arrange(PLAYER_NAME, GAME_DATE, GAME_ID) %>%
   group_by(PLAYER_NAME) %>%
   mutate(SHOT_LAG1 = lag(SHOT_MADE_BINARY)) %>%
-  ungroup()
+  ungroup() %>%
+  filter(!is.na(SHOT_LAG1))
 
-df_recent <- df_recent %>% filter(!is.na(SHOT_LAG1))
-
-# build design matrix
-
-# sample subset 
+# sample subset for speed
 set.seed(1)
 df_sample <- df_recent %>% sample_n(200000)
 
-# X matrix (bias + lag)
-X <- cbind(1, df_sample$SHOT_LAG1)
+# train/test-split
 
-# y vector
-y <- df_sample$SHOT_MADE_BINARY
+set.seed(1)
+train_idx <- sample(1:nrow(df_sample), size = 0.8 * nrow(df_sample))
 
-n <- nrow(X)
-p <- ncol(X)
+train_data <- df_sample[train_idx, ]
+test_data  <- df_sample[-train_idx, ]
 
-# logistic function
+# priors
 
-sigmoid <- function(z) {
-  1 / (1 + exp(-z))
-}
+priors <- c(
+  prior(normal(0, 5), class = "Intercept"),
+  prior(normal(0, 5), class = "b")
+)
 
-# approximate mle
+# fit model
 
-# use simple optimization
+model_brm <- brm(
+  formula = SHOT_MADE_BINARY ~ SHOT_LAG1,
+  data = train_data,
+  family = bernoulli("logit"),
+  prior = priors,
+  chains = 4,
+  iter = 1000,
+  warmup = 200,
+  cores = parallel::detectCores(),
+  backend = "cmdstanr"  # ensures faster compilation and execution
+)
 
-log_likelihood <- function(w) {
-  p <- sigmoid(X %*% w)
-  sum(y * log(p + 1e-8) + (1 - y) * log(1 - p + 1e-8))
-}
+# make predictions
 
-# optimize
-opt <- optim(rep(0, p), fn = function(w) -log_likelihood(w))
+# predictions on test set
+preds <- posterior_predict(model_brm, newdata = test_data)
 
-w_hat <- opt$par
-w_hat
+# convert posterior predictions to mean probability
+pred_probs <- colMeans(preds)
 
-# Bayesian sampling (normal)
+# convert to binary classification
+pred_binary <- ifelse(pred_probs >= 0.5, 1, 0)
 
-# vector of weights (NO matrix)
-p_hat <- sigmoid(X %*% w_hat)
-w_vec <- as.vector(p_hat * (1 - p_hat))
+# accuracy
+accuracy <- mean(pred_binary == test_data$SHOT_MADE_BINARY)
+cat("Test set accuracy:", accuracy, "\n")
 
-# efficient computation 
-WX <- X * w_vec 
-Sigma_hat <- solve(t(X) %*% WX)
-
-# posterior draws
-n_samples <- 5000
-
-w_tilde <- rmvn(n_samples, mu = w_hat, sigma = Sigma_hat)
-
-# posterior analysis
-
-# posterior summaries
-colMeans(w_tilde)
-
-# histograms
-hist(w_tilde[,1], main = "Posterior of Intercept")
-hist(w_tilde[,2], main = "Posterior of Lag Effect (Hot Hand)")
+# summary
+summary(model_brm)
 
 
 
 
+# exhibits
+library(ggplot2)
+library(bayesplot)
+
+# posterior distribution of lag coefficient
+posterior <- as.data.frame(model_brm)
+ggplot(posterior, aes(x = b_SHOT_LAG1)) +
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Posterior Distribution of Lag Coefficient",
+    x = "Lag Coefficient (SHOT_LAG1)",
+    y = "Frequency"
+  )
 
 
-
-
-
-
+# histogram of predicted probabilities
+ggplot(data.frame(pred_probs), aes(x = pred_probs)) +
+  geom_histogram(bins = 30, fill = "lightgreen", color = "black") +
+  labs(
+    title = "Histogram of Predicted Probabilities",
+    x = "Predicted Probability of Making Shot",
+    y = "Count"
+  )
 
